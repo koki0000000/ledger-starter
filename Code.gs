@@ -95,6 +95,8 @@ function guessCategory_(store) {
 
 // ---- Notion書き込み ----
 
+// 戻り値は作成したページのID。ボタンでの分類訂正（手順7）はこのIDをcustom_idに載せて
+// どのページを直すかを覚える（Notion側に別テーブルを持たない・ステートレスにするため）。
 function registerToNotion_(expense) {
   const res = UrlFetchApp.fetch('https://api.notion.com/v1/pages', {
     method: 'post',
@@ -118,19 +120,29 @@ function registerToNotion_(expense) {
   if (res.getResponseCode() !== 200) {
     throw new Error('Notion登録エラー ' + res.getResponseCode() + ': ' + res.getContentText().slice(0, 200));
   }
+  return JSON.parse(res.getContentText()).id;
 }
 
-// DISCORD_WEBHOOK_URLが空なら何もしない（未設定でも今までどおり動く）。
+function notifyLine_(expense) {
+  return `${expense.date} · ${expense.store} · ¥${expense.amount.toLocaleString()} · ${expense.card} · ${expense.category}`;
+}
+
+// DISCORD_BOT_TOKEN/DISCORD_CHANNEL_ID（手順7）が両方揃っていれば分類の選び直しが
+// 付いた通知に切り替える。どちらか片方だけの設定は「未設定」と同じ扱いにする
+// （中途半端な設定でBot経由の投稿だけ試みてエラーになるのを避けるため）。
+// それ以外はDISCORD_WEBHOOK_URLが空なら何もしない（未設定でも今までどおり動く）。
 // 通知は記帳のおまけなので、ここで例外を投げるとNotion登録が済んだ後の処理まで失敗扱いになる。
-function notifyDiscord_(expense) {
+function notifyDiscord_(expense, pageId) {
+  if (DISCORD_BOT_TOKEN && DISCORD_CHANNEL_ID) {
+    notifyDiscordInteractive_(expense, pageId);
+    return;
+  }
   if (!DISCORD_WEBHOOK_URL) return;
   try {
     const res = UrlFetchApp.fetch(DISCORD_WEBHOOK_URL, {
       method: 'post',
       contentType: 'application/json',
-      payload: JSON.stringify({
-        content: `${expense.date} · ${expense.store} · ¥${expense.amount.toLocaleString()} · ${expense.card} · ${expense.category}`,
-      }),
+      payload: JSON.stringify({ content: notifyLine_(expense) }),
       muteHttpExceptions: true,
     });
     if (res.getResponseCode() >= 300) {
@@ -138,6 +150,38 @@ function notifyDiscord_(expense) {
     }
   } catch (e) {
     Logger.log('notifyDiscord_: ' + e);
+  }
+}
+
+// notion-template.mdの「分類」10択と揃える（手順7のセレクトメニューの選択肢）。
+const CATEGORIES = ['食費', '食料品', '日用品', 'ネット通販', 'サブスク・娯楽', '医療', '光熱費', '通信', '交通', 'その他'];
+
+// custom_idにページIDを埋め込むだけで、押した人が誰か・どの通知かをGAS側に保存しない
+// （Script Propertiesに状態を増やすほど故障点が増える。速報/確報の合わせ込みと同じ考え方）。
+function notifyDiscordInteractive_(expense, pageId) {
+  try {
+    const payload = {
+      content: notifyLine_(expense),
+      components: [{
+        type: 1,
+        components: [{
+          type: 3,
+          custom_id: LEDGER_CAT_PREFIX + pageId,
+          options: CATEGORIES.map(name => ({ label: name, value: name, default: name === expense.category })),
+        }],
+      }],
+    };
+    const res = UrlFetchApp.fetch('https://discord.com/api/v10/channels/' + DISCORD_CHANNEL_ID + '/messages', {
+      method: 'post',
+      headers: { Authorization: 'Bot ' + DISCORD_BOT_TOKEN, 'Content-Type': 'application/json' },
+      payload: JSON.stringify(payload),
+      muteHttpExceptions: true,
+    });
+    if (res.getResponseCode() >= 300) {
+      Logger.log('notifyDiscordInteractive_: 送信失敗 ' + res.getResponseCode() + ': ' + res.getContentText().slice(0, 200));
+    }
+  } catch (e) {
+    Logger.log('notifyDiscordInteractive_: ' + e);
   }
 }
 
@@ -185,29 +229,29 @@ function findSameRows_(expense) {
 // 三井住友の「ご利用明細のお知らせ」は、即時の通知が来なかった利用（iD払い等）を知らせる一方、
 // 即時の通知があった利用も載ることがある（返品で両方に届いた例がある）。
 // 同じ日付・金額の行が既にあれば記帳しない。
-// 戻り値は「新規に行を作ったか」（Discord通知の要否をcheckCardEmails側で判断するため）。
+// 戻り値のcreatedは「新規に行を作ったか」（Discord通知の要否をcheckCardEmails側で判断するため）。
 function recordVpassStatement_(expense) {
-  if (findSameRows_(expense).length) return false;
-  registerToNotion_(expense);
-  return true;
+  if (findSameRows_(expense).length) return { created: false, pageId: null };
+  const pageId = registerToNotion_(expense);
+  return { created: true, pageId };
 }
 
-// 戻り値は「新規に行を作ったか」。既存行の店名書き換えは記帳そのものではないので、
-// ここではfalseを返しDiscordには通知しない（通知するのは新しく1行増えた時だけ）。
+// 戻り値のcreatedは「新規に行を作ったか」。既存行の店名書き換えは記帳そのものではないので、
+// createdはfalseのままDiscordには通知しない（通知するのは新しく1行増えた時だけ）。
 function recordFinalViewCard_(expense) {
   const rows = findSameRows_(expense);
   // 同じ店名の行があれば記帳済み。これを先に見ないと、同じ日・同じ金額の別の利用の総称の行を書き換えてしまう。
-  if (rows.some(r => r.store === expense.store)) return false;
+  if (rows.some(r => r.store === expense.store)) return { created: false, pageId: null };
   const generic = rows.find(r => VIEW_GENERIC_STORE.test(r.store));
   if (generic) {
     const props = { '名前': { title: [{ text: { content: expense.store } }] } };
     if (!generic.category || generic.category === 'その他') props['分類'] = { select: { name: expense.category } };
     notionFetch_('https://api.notion.com/v1/pages/' + generic.id, 'patch', { properties: props });
-    return false;
+    return { created: false, pageId: null };
   }
-  if (rows.length) return false;
-  registerToNotion_(expense);
-  return true;
+  if (rows.length) return { created: false, pageId: null };
+  const pageId = registerToNotion_(expense);
+  return { created: true, pageId };
 }
 
 // ラベルは初回実行時に自動作成される。手で作る必要はない。
@@ -273,10 +317,15 @@ function checkCardEmails() {
           if (msg.getDate().getTime() < since) continue;
           try {
             const expense = parseMsg_(msg);
-            let created = false;
-            if (expense && expense.card === 'ビューカード' && expense.isFinal) created = recordFinalViewCard_(expense);
-            else if (expense && expense.card === '三井住友' && expense.isStatement) created = recordVpassStatement_(expense);
-            else if (expense) { registerToNotion_(expense); created = true; }
+            let created = false, pageId = null;
+            if (expense && expense.card === 'ビューカード' && expense.isFinal) {
+              ({ created, pageId } = recordFinalViewCard_(expense));
+            } else if (expense && expense.card === '三井住友' && expense.isStatement) {
+              ({ created, pageId } = recordVpassStatement_(expense));
+            } else if (expense) {
+              pageId = registerToNotion_(expense);
+              created = true;
+            }
             // Notion書き込みが成功した直後（または記帳対象でないと分かった直後）に保存する。
             // 末尾でまとめて保存すると、途中の1件が例外で落ちたときに直前まで成功した分が
             // 「未処理」のまま残り、次の1分の実行がNotionへ二重登録してしまう。
@@ -285,7 +334,7 @@ function checkCardEmails() {
             // Discord通知・ラベル付けはどちらもNotion書き込みの成否と別に失敗しうる（Webhook先の
             // 不調・Gmail側のAPI制限等）。saveDoneIds_より前に置くと、ここで時間がかかった・詰まった
             // ときに二重登録防止の保存が遅れる（記帳の正しさより通知を優先させない）ため、必ず後に置く。
-            if (created) notifyDiscord_(expense);
+            if (created) notifyDiscord_(expense, pageId);
             try {
               labelThread_(thread, expense ? '記帳済み' : '要確認');
             } catch (labelErr) {
@@ -309,4 +358,63 @@ function checkCardEmails() {
   if (errors.length) {
     throw new Error(errors.length + '件のメールでエラー:\n' + errors.join('\n'));
   }
+}
+
+// ---- Discordのボタンでの分類訂正（手順7・任意） ----
+// 署名検証とDiscordへの応答はCloudflare Worker側で行い、doPostにはinteractionのJSONが
+// そのまま届く（README「7」参照）。GAS単体ではHTTPヘッダーを受け取れずDiscordの署名検証が
+// できないため、この経路が無ければ手順7は使えない。
+// 戻り値は「元メッセージをどう書き換えるか」で、WorkerはこれをそのままDiscordへのPATCH本文に使う。
+
+const LEDGER_CAT_PREFIX = 'ledger_cat:';
+
+function doPost(e) {
+  let interaction;
+  try {
+    interaction = JSON.parse(e.postData.contents);
+  } catch (err) {
+    return jsonOutput_({ ok: false, error: 'interactionのJSONを読めませんでした' });
+  }
+  try {
+    return jsonOutput_(handleCategoryInteraction_(interaction));
+  } catch (err) {
+    Logger.log('doPost: ' + err);
+    return jsonOutput_({ ok: false, error: String(err) });
+  }
+}
+
+function jsonOutput_(obj) {
+  return ContentService.createTextOutput(JSON.stringify(obj)).setMimeType(ContentService.MimeType.JSON);
+}
+
+// type 3 = MESSAGE_COMPONENT（セレクトメニューの選択）。custom_idにページIDを埋め込んでいる
+// ので、それ以外のinteraction（他のcustom_id・スラッシュコマンド等）は素通りさせず断る。
+function handleCategoryInteraction_(interaction) {
+  const customId = (interaction.data && interaction.data.custom_id) || '';
+  if (interaction.type !== 3 || !customId.startsWith(LEDGER_CAT_PREFIX)) {
+    return { ok: false, error: '対応していない操作です: ' + customId };
+  }
+  const pageId = customId.slice(LEDGER_CAT_PREFIX.length);
+  const category = (interaction.data.values || [])[0];
+  if (!pageId || !category) {
+    return { ok: false, error: 'ページIDまたは分類を読めませんでした' };
+  }
+  notionFetch_('https://api.notion.com/v1/pages/' + pageId, 'patch', {
+    properties: { '分類': { select: { name: category } } },
+  });
+  return { components: updatedComponents_(interaction.message, customId, category) };
+}
+
+// 選んだ分類にdefaultを付け替えるだけで、他のフィールド（content等）はPATCH本文に含めない。
+// Discordのメッセージ編集は渡さなかったフィールドをそのまま残すため、これで元の表示が保たれる。
+function updatedComponents_(message, customId, category) {
+  const components = (message && message.components) || [];
+  return components.map(row => ({
+    ...row,
+    components: (row.components || []).map(c =>
+      (c.type === 3 && c.custom_id === customId)
+        ? { ...c, options: c.options.map(o => ({ ...o, default: o.value === category })) }
+        : c
+    ),
+  }));
 }
