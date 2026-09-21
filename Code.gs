@@ -127,13 +127,13 @@ function notifyLine_(expense) {
   return `${expense.date} · ${expense.store} · ¥${expense.amount.toLocaleString()} · ${expense.card} · ${expense.category}`;
 }
 
-// DISCORD_BOT_TOKEN/DISCORD_CHANNEL_ID（手順7）が両方揃っていれば分類の選び直しが
-// 付いた通知に切り替える。どちらか片方だけの設定は「未設定」と同じ扱いにする
+// DISCORD_CHANNEL_ID/NOTIFY_SECRET/DISCORD_NOTIFY_URL（手順7）が3つとも揃っていれば
+// 分類の選び直しが付いた通知に切り替える。1つでも欠けていれば「未設定」と同じ扱いにする
 // （中途半端な設定でBot経由の投稿だけ試みてエラーになるのを避けるため）。
 // それ以外はDISCORD_WEBHOOK_URLが空なら何もしない（未設定でも今までどおり動く）。
 // 通知は記帳のおまけなので、ここで例外を投げるとNotion登録が済んだ後の処理まで失敗扱いになる。
 function notifyDiscord_(expense, pageId) {
-  if (DISCORD_BOT_TOKEN && DISCORD_CHANNEL_ID) {
+  if (DISCORD_CHANNEL_ID && NOTIFY_SECRET && DISCORD_NOTIFY_URL) {
     notifyDiscordInteractive_(expense, pageId);
     return;
   }
@@ -158,6 +158,14 @@ const CATEGORIES = ['食費', '食料品', '日用品', 'ネット通販', 'サ�
 
 // custom_idにページIDを埋め込むだけで、押した人が誰か・どの通知かをGAS側に保存しない
 // （Script Propertiesに状態を増やすほど故障点が増える。速報/確報の合わせ込みと同じ考え方）。
+//
+// Discordへの投稿はCloudflare Worker（worker.js）に依頼する。GASのUrlFetchAppから直接
+// Discord Bot APIを叩くと、トークン・チャンネルID・権限が正しくても毎回
+// 403 {"code":40333,"message":"internal network error"} で拒否される（Discord側のエッジが
+// GASの発信元を塞いでいる恒常的な挙動で、設定の誤りではない。実機で確認した）。
+// 同じ呼び出しをWorkerから行うと成功するため、投稿だけを
+// Workerに移した。NOTIFY_SECRETはWorkerがこのリクエストをGASからのものと確認するための
+// 合言葉（Discordの署名検証とは別物。doPost側のinteractionには使わない）。
 function notifyDiscordInteractive_(expense, pageId) {
   try {
     const payload = {
@@ -171,9 +179,9 @@ function notifyDiscordInteractive_(expense, pageId) {
         }],
       }],
     };
-    const res = UrlFetchApp.fetch('https://discord.com/api/v10/channels/' + DISCORD_CHANNEL_ID + '/messages', {
+    const res = UrlFetchApp.fetch(DISCORD_NOTIFY_URL, {
       method: 'post',
-      headers: { Authorization: 'Bot ' + DISCORD_BOT_TOKEN, 'Content-Type': 'application/json' },
+      headers: { 'X-Secret': NOTIFY_SECRET, 'X-Channel-Id': DISCORD_CHANNEL_ID, 'Content-Type': 'application/json' },
       payload: JSON.stringify(payload),
       muteHttpExceptions: true,
     });

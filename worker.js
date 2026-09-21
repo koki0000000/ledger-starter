@@ -1,10 +1,38 @@
-// Discordの署名検証とGASへの中継だけを行うCloudflare Worker。
+// Discordの署名検証・GASへの中継・GASからのDiscord投稿代行だけを行うCloudflare Worker。
 // Cloudflareダッシュボードのコードエディタにそのまま貼り付けて使う設計で、wranglerやnpmは要らない
 // （手順7参照）。ここに家計簿固有の処理（分類の判定・Notionの読み書き等）は一切書かない。GAS側の
-// doPost（Code.gs）がすべて行い、このWorkerはinteractionのJSONを右から左へ渡すだけにする。
+// doPost（Code.gs）がすべて行い、interaction の経路では、このWorkerはJSONを右から左へ渡すだけにする。
 
 export default {
   async fetch(request, env, ctx) {
+    const url = new URL(request.url);
+
+    // GAS → Worker → Discord Bot API（Code.gsのnotifyDiscordInteractive_が呼ぶ）。
+    // GASのUrlFetchAppから直接Discordへ投稿すると403 code 40333で拒否される
+    // （Discord側のエッジがGASの発信元を塞ぐ恒常的な挙動。実機で確認した）。
+    // WorkerのURLは`(名前).(アカウント名).workers.dev`の形で人には推測しにくいが、
+    // 総当たりされない保証ではないため、X-Secretで誰からの呼び出しかを確認する。
+    // エラー文言はDiscordが返す401（Botトークン誤り）と区別できるようにする
+    // （GAS側のログを見て買った人が自分で切り分けられるように。SETUP.mdの「失敗したときの見分け方」参照）。
+    if (request.method === 'POST' && url.pathname === '/notify') {
+      if (request.headers.get('X-Secret') !== env.NOTIFY_SECRET) {
+        return new Response('NOTIFY_SECRET mismatch', { status: 401 });
+      }
+      const channelId = request.headers.get('X-Channel-Id');
+      const body = await request.text();
+      try {
+        const res = await fetch(`https://discord.com/api/v10/channels/${channelId}/messages`, {
+          method: 'POST',
+          headers: { Authorization: `Bot ${env.DISCORD_BOT_TOKEN}`, 'Content-Type': 'application/json' },
+          body,
+        });
+        const text = await res.text();
+        return new Response(text, { status: res.status, headers: { 'Content-Type': 'application/json' } });
+      } catch (e) {
+        return new Response(JSON.stringify({ error: String(e) }), { status: 502, headers: { 'Content-Type': 'application/json' } });
+      }
+    }
+
     if (request.method !== 'POST') return new Response('OK');
 
     const sig = request.headers.get('X-Signature-Ed25519');
