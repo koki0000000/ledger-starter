@@ -1,5 +1,5 @@
 // Code.gs — カード利用メールを読み、Notionの家計簿データベースに1行追加する。
-// 1分おきの時間主導トリガーで checkCardEmails() を呼ぶ想定（設定手順は README.md）。
+// 1分おきの時間主導トリガーで checkCardEmails() を呼ぶ想定（設定手順は SETUP.md）。
 
 // ---- 日付・金額の下ごしらえ ----
 
@@ -21,7 +21,7 @@ function extract_(body, dateRe, storeRe, amountRe) {
 }
 
 // ---- カード会社ごとのメール解析 ----
-// 外貨決済・取消/返品・カード券種の判定は含まない（README「できないこと」参照）。
+// 外貨決済・取消/返品・カード券種の判定は含まない（SETUP.md の「できないこと」参照）。
 // 金額は「円」で終わり符号の無いものだけを読む。外貨や「-1,234円」のような返品はnullになる。
 // 対象外の形式はamountRe等が一致せずnullを返し、要確認ラベルへ回る＝黙って消えはしない。
 
@@ -51,7 +51,7 @@ function parseViewCard_(body) {
 }
 
 // viewsnet.jpはJR東日本「ビューカード」の通知ドメイン（JALカードSuica・ルミネカード・JRE CARD等が
-// ここから届く。JCB/DC/AMEX発行のJALカードは対象外＝README「できないこと」参照）。
+// ここから届く。JCB/DC/AMEX発行のJALカードは対象外＝SETUP.md の「できないこと」参照）。
 const CARD_SENDERS = [
   { match: /vpass\.ne\.jp/i,        name: '三井住友',     parse: parseVpass_ },
   { match: /rakuten-card\.co\.jp/i, name: '楽天カード',   parse: parseRakuten_ },
@@ -279,7 +279,7 @@ function saveDoneIds_(props, ids) {
 
 function checkCardEmails() {
   if (NOTION_TOKEN === 'ここに貼る' || NOTION_DATABASE_ID === 'ここに貼る') {
-    throw new Error('Config.gs の NOTION_TOKEN / NOTION_DATABASE_ID がまだ未設定です（README手順3参照）');
+    throw new Error('Config.gs の NOTION_TOKEN / NOTION_DATABASE_ID がまだ未設定です（SETUP.md の手順3参照）');
   }
   // 1分ごとのトリガーは前回の実行が長引くと重なって同じメールを2度処理しうるため、
   // 鍵が取れない回は今回を丸ごと見送る（次の1分でやり直せば十分）。
@@ -362,7 +362,7 @@ function checkCardEmails() {
 
 // ---- Discordのボタンでの分類訂正（手順7・任意） ----
 // 署名検証とDiscordへの応答はCloudflare Worker側で行い、doPostにはinteractionのJSONが
-// そのまま届く（README「7」参照）。GAS単体ではHTTPヘッダーを受け取れずDiscordの署名検証が
+// そのまま届く（SETUP.md の手順7参照）。GAS単体ではHTTPヘッダーを受け取れずDiscordの署名検証が
 // できないため、この経路が無ければ手順7は使えない。
 // 戻り値は「元メッセージをどう書き換えるか」で、WorkerはこれをそのままDiscordへのPATCH本文に使う。
 
