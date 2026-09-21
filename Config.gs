@@ -1,4 +1,4 @@
-// Config.gs — 設定はこの3つだけ。値の取得手順は README.md を参照。
+// Config.gs — 必須の設定は上の3つ。DISCORD_WEBHOOK_URLは任意。値の取得手順は README.md を参照。
 
 // Notion Integration Token（Notionの「連携アプリ」を作ると発行される）
 const NOTION_TOKEN = 'ここに貼る';
@@ -8,3 +8,6 @@ const NOTION_DATABASE_ID = 'ここに貼る';
 
 // 処理済み/要確認メールに付けるGmailラベルの名前（存在しなければ自動作成する）
 const MONITOR_LABEL = 'Ledger Starter';
+
+// Discord Webhook URL（任意。空のままなら通知しません。設定手順はREADME手順6）
+const DISCORD_WEBHOOK_URL = '';

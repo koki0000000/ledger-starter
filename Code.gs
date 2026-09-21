@@ -120,6 +120,27 @@ function registerToNotion_(expense) {
   }
 }
 
+// DISCORD_WEBHOOK_URLが空なら何もしない（未設定でも今までどおり動く）。
+// 通知は記帳のおまけなので、ここで例外を投げるとNotion登録が済んだ後の処理まで失敗扱いになる。
+function notifyDiscord_(expense) {
+  if (!DISCORD_WEBHOOK_URL) return;
+  try {
+    const res = UrlFetchApp.fetch(DISCORD_WEBHOOK_URL, {
+      method: 'post',
+      contentType: 'application/json',
+      payload: JSON.stringify({
+        content: `${expense.date} · ${expense.store} · ¥${expense.amount.toLocaleString()} · ${expense.card} · ${expense.category}`,
+      }),
+      muteHttpExceptions: true,
+    });
+    if (res.getResponseCode() >= 300) {
+      Logger.log('notifyDiscord_: 送信失敗 ' + res.getResponseCode() + ': ' + res.getContentText().slice(0, 200));
+    }
+  } catch (e) {
+    Logger.log('notifyDiscord_: ' + e);
+  }
+}
+
 function notionFetch_(url, method, body) {
   const res = UrlFetchApp.fetch(url, {
     method: method,
@@ -164,24 +185,29 @@ function findSameRows_(expense) {
 // 三井住友の「ご利用明細のお知らせ」は、即時の通知が来なかった利用（iD払い等）を知らせる一方、
 // 即時の通知があった利用も載ることがある（返品で両方に届いた例がある）。
 // 同じ日付・金額の行が既にあれば記帳しない。
+// 戻り値は「新規に行を作ったか」（Discord通知の要否をcheckCardEmails側で判断するため）。
 function recordVpassStatement_(expense) {
-  if (findSameRows_(expense).length) return;
+  if (findSameRows_(expense).length) return false;
   registerToNotion_(expense);
+  return true;
 }
 
+// 戻り値は「新規に行を作ったか」。既存行の店名書き換えは記帳そのものではないので、
+// ここではfalseを返しDiscordには通知しない（通知するのは新しく1行増えた時だけ）。
 function recordFinalViewCard_(expense) {
   const rows = findSameRows_(expense);
   // 同じ店名の行があれば記帳済み。これを先に見ないと、同じ日・同じ金額の別の利用の総称の行を書き換えてしまう。
-  if (rows.some(r => r.store === expense.store)) return;
+  if (rows.some(r => r.store === expense.store)) return false;
   const generic = rows.find(r => VIEW_GENERIC_STORE.test(r.store));
   if (generic) {
     const props = { '名前': { title: [{ text: { content: expense.store } }] } };
     if (!generic.category || generic.category === 'その他') props['分類'] = { select: { name: expense.category } };
     notionFetch_('https://api.notion.com/v1/pages/' + generic.id, 'patch', { properties: props });
-    return;
+    return false;
   }
-  if (rows.length) return;
+  if (rows.length) return false;
   registerToNotion_(expense);
+  return true;
 }
 
 // ラベルは初回実行時に自動作成される。手で作る必要はない。
@@ -247,16 +273,19 @@ function checkCardEmails() {
           if (msg.getDate().getTime() < since) continue;
           try {
             const expense = parseMsg_(msg);
-            if (expense && expense.card === 'ビューカード' && expense.isFinal) recordFinalViewCard_(expense);
-            else if (expense && expense.card === '三井住友' && expense.isStatement) recordVpassStatement_(expense);
-            else if (expense) registerToNotion_(expense);
+            let created = false;
+            if (expense && expense.card === 'ビューカード' && expense.isFinal) created = recordFinalViewCard_(expense);
+            else if (expense && expense.card === '三井住友' && expense.isStatement) created = recordVpassStatement_(expense);
+            else if (expense) { registerToNotion_(expense); created = true; }
             // Notion書き込みが成功した直後（または記帳対象でないと分かった直後）に保存する。
             // 末尾でまとめて保存すると、途中の1件が例外で落ちたときに直前まで成功した分が
             // 「未処理」のまま残り、次の1分の実行がNotionへ二重登録してしまう。
             ids.push(id);
             saveDoneIds_(props, ids);
-            // ラベル付けはNotion書き込みの成否と別に失敗しうる（Gmail側のAPI制限等）ので、
-            // ここで失敗しても上の保存はやり直さない＝二重登録の危険はない。
+            // Discord通知・ラベル付けはどちらもNotion書き込みの成否と別に失敗しうる（Webhook先の
+            // 不調・Gmail側のAPI制限等）。saveDoneIds_より前に置くと、ここで時間がかかった・詰まった
+            // ときに二重登録防止の保存が遅れる（記帳の正しさより通知を優先させない）ため、必ず後に置く。
+            if (created) notifyDiscord_(expense);
             try {
               labelThread_(thread, expense ? '記帳済み' : '要確認');
             } catch (labelErr) {
